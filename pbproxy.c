@@ -12,15 +12,15 @@
 
 #include "pbproxy.h"
 
-int init_ctr(struct ctr_state *state, const unsigned char IV[8]) {
+int init_ctr(struct ctr_state *state, const unsigned char IV[IVSIZE]) {
 
 	state->num = 0;
 
+	memset(state->IVec + IVSIZE, 0, IVSIZE);
+
+	memcpy(state->IVec, IV, IVSIZE);
+
 	memset(state->ecount, 0, AES_BLOCK_SIZE);
-
-	memset(state->IVec + 8, 0, 8);
-
-	memcpy(state->IVec, IV, 8);
 }
 
 char * read_key(const char *filename) {
@@ -58,25 +58,25 @@ char * read_key(const char *filename) {
 bool send_encr(char *raw_buffer, int n, int fd, AES_KEY * act_key){
 
 	struct 	ctr_state 	state;
-	unsigned char 		IV[8];
+	unsigned char 		IV[IVSIZE];
 	unsigned char 		encryption[n];
 
-	if(!RAND_bytes(IV, 8)) {
+	if(!RAND_bytes(IV, IVSIZE)) {
 		fprintf(stderr, "Error generating random bytes\n");
 		return false;
 	}
 
-	char *tmp = (char*) malloc(n + 8);
-	memcpy(tmp, IV, 8);
+	char *tmp = (char*) malloc(n + IVSIZE);
+	memcpy(tmp, IV, IVSIZE);
 	
 	init_ctr(&state, IV);
 	
 	AES_ctr128_encrypt(raw_buffer, encryption, n, act_key, state.IVec,
 		state.ecount, &state.num);
 
-	memcpy(tmp + 8, encryption, n);
+	memcpy(tmp + IVSIZE, encryption, n);
 	
-	write(fd, tmp, n + 8);
+	write(fd, tmp, n + IVSIZE);
 	
 	free(tmp);
 
@@ -86,29 +86,26 @@ bool send_encr(char *raw_buffer, int n, int fd, AES_KEY * act_key){
 bool recv_decr(char *raw_buffer, int n, int fd, AES_KEY * act_key) {
 
 	struct 	ctr_state 	state;
-	unsigned char 		IV[8];
-	unsigned char 		decryption[n-8];
+	unsigned char 		IV[IVSIZE];
+	unsigned char 		decryption[n-IVSIZE];
 
-	memcpy(IV, raw_buffer, 8);
+	memcpy(IV, raw_buffer, IVSIZE);
 
 	init_ctr(&state, IV);
 		
-	AES_ctr128_encrypt(raw_buffer + 8, decryption, n - 8, act_key, state.IVec,
+	AES_ctr128_encrypt(raw_buffer + IVSIZE, decryption, n - IVSIZE, act_key, state.IVec,
 		state.ecount, &state.num);
 		
-	write(fd, decryption, n-8);
+	write(fd, decryption, n-IVSIZE);
 
 	return true;
 }
 
 void * server_routine(void * ptr) {
 
-	pthread_detach(pthread_self());
-
 	int 		accepted_session_fd = -1, n = 0;
 	char 		buffer[PACKETSIZE];
 	int 		flags;
-	bool 		ssh_done = false;
 	AES_KEY 	act_key;
 
 	printf("New server proxy thread\n");
@@ -117,8 +114,8 @@ void * server_routine(void * ptr) {
 
 	accepted_session_fd = socket(AF_INET, SOCK_STREAM, 0);
 
-	if (-1 == connect(accepted_session_fd, (struct sockaddr *)&p_data->rep_add,
-		sizeof(p_data->rep_add))) {
+	if (-1 == connect(accepted_session_fd, (struct sockaddr *)&p_data->final_add,
+		sizeof(p_data->final_add))) {
 		fprintf(stderr, "Accepted Session Connect failed\n");
 		fprintf(stderr, "Check of open ports\n");
 		pthread_exit(NULL);
@@ -138,40 +135,42 @@ void * server_routine(void * ptr) {
 	memset(buffer, 0, sizeof(buffer));
 	
 	if (AES_set_encrypt_key(p_data->key, 128, &act_key) < 0) {
-		fprintf(stderr, "Set encryption key error!\n");
-		exit(1);
+		fprintf(stderr, "Set encryption key error\n");
+		pthread_exit(NULL);
 	}
 	
 	while (1) {
 		while ((n = read(p_data->new_sock, buffer, PACKETSIZE)) >= 0) {
-			if (n == 0)
+			if (n == 0) {
+				close(p_data->new_sock);
+				close(accepted_session_fd);
+				fprintf(stderr, "Server relay thread exiting\n");
 				pthread_exit(NULL);
+			}
 
-			recv_decr(buffer, n, accepted_session_fd, &act_key);
+			if (n > 0)
+				recv_decr(buffer, n, accepted_session_fd, &act_key);
 
 			if (n < PACKETSIZE)
 				break;
 		}
 
-		while ((n = read(accepted_session_fd, buffer, PACKETSIZE)) > 0) {
+		while ((n = read(accepted_session_fd, buffer, PACKETSIZE)) >= 0) {
 			
-			if (n == 0)
+			if (n == 0) {
+				close(p_data->new_sock);
+				close(accepted_session_fd);
+				fprintf(stderr, "Server relay thread exiting\n");
 				pthread_exit(NULL);
+			}
 
 			if (n > 0)
 				send_encr(buffer, n, p_data->new_sock, &act_key);
 			
-			if (ssh_done == false && n == 0)
-				ssh_done = true;
-			
 			if (n < PACKETSIZE)
 				break;
 		}
-
-		if (ssh_done)
-			break;
 	}
-
 	pthread_exit(0);
 }
 
@@ -179,22 +178,22 @@ void service_proxy(int listen_port, int dest_port, struct hostent * dest_entry,
 			char *key) {
 
 	pthread_t 			server_thread;
-	int 				server_fd = -1;
 
-	struct sockaddr_in 	serv_addr, rep_add;
+	struct sockaddr_in 	serv_addr, final_add;
 	
-	server_fd = socket(AF_INET, SOCK_STREAM, 0);
+	int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+
+
+	final_add.sin_family		= AF_INET;
+	final_add.sin_addr.s_addr 	= ((struct in_addr *)
+									(dest_entry->h_addr))->s_addr;
+	final_add.sin_port			= htons(dest_port);
 
 	bzero((char *) &serv_addr, sizeof(serv_addr));
 
 	serv_addr.sin_family 		= AF_INET;
 	serv_addr.sin_addr.s_addr 	= INADDR_ANY;
 	serv_addr.sin_port 	 		= htons(listen_port);
-
-	rep_add.sin_family			= AF_INET;
-	rep_add.sin_addr.s_addr 	= ((struct in_addr *)
-									(dest_entry->h_addr))->s_addr;
-	rep_add.sin_port			= htons(dest_port);
 
 	if (0 > bind(server_fd, (struct sockaddr *)&serv_addr, sizeof(serv_addr))) {
 		fprintf(stderr, "Unable to bind the address\n");
@@ -210,6 +209,7 @@ void service_proxy(int listen_port, int dest_port, struct hostent * dest_entry,
 		struct sockaddr_in 		dest_addr;
 		socklen_t 				len;
 		int 					accepted_fd = -1;
+		struct proxy_data 		*p_data;
 
 		len = sizeof(dest_addr);
 
@@ -217,17 +217,17 @@ void service_proxy(int listen_port, int dest_port, struct hostent * dest_entry,
 						&len))) {
 
 			fprintf (stderr, "Error in accepting\n");	
-			return;
+			break;
 		}
 
-		struct proxy_data *p_data = (struct proxy_data *) malloc (
-				sizeof(struct proxy_data));
+		p_data = (struct proxy_data *)malloc(sizeof(struct proxy_data));
 
-		p_data->rep_add 	= rep_add;
-		p_data->key 		= key;
+		p_data->final_add 	= final_add;
 		p_data->new_sock 	= accepted_fd;
+		p_data->key 		= key;
 
 		pthread_create(&server_thread, NULL, server_routine, (void *)p_data);
+		pthread_detach(server_thread);
 	}
 }
 
@@ -237,7 +237,7 @@ void service_client(int dest_port, struct hostent * dest_entry, char *key) {
 	AES_KEY 			act_key;
 
 	int 				client_fd = -1, n = 0;
-	struct 	sockaddr_in serv_addr, rep_add;	
+	struct 	sockaddr_in serv_addr, final_add;	
 	char 				buffer[PACKETSIZE];
 	
 	client_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -268,17 +268,29 @@ void service_client(int dest_port, struct hostent * dest_entry, char *key) {
 
 	//TODO MORE ERROR CHECKING IN LOOP AND CLEANUP
 	while (true) {
-		while ((n = read(STDIN_FILENO, buffer, PACKETSIZE)) > 0) {
+		while ((n = read(STDIN_FILENO, buffer, PACKETSIZE)) >= 0) {
 
-			send_encr(buffer, n, client_fd, &act_key);
+			if (n == 0) {
+				fprintf(stderr, "Client Exiting\n");
+				return;
+			}
+
+			if (n > 0)
+				send_encr(buffer, n, client_fd, &act_key);
 
 			if (n < PACKETSIZE)
 				break;
 		}
 
-		while ((n = read(client_fd, buffer, PACKETSIZE)) > 0) {
+		while ((n = read(client_fd, buffer, PACKETSIZE)) >= 0) {
 
-			recv_decr(buffer, n, STDOUT_FILENO, &act_key);
+			if (n == 0) {
+				fprintf(stderr, "Client Exiting\n");
+				return;
+			}
+
+			if (n > 0)
+				recv_decr(buffer, n, STDOUT_FILENO, &act_key);
 
 			if (n < PACKETSIZE)
 				break;
