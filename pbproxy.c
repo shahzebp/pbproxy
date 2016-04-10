@@ -55,159 +55,6 @@ char * read_key(const char *filename) {
     return result;
 }
 
-void * server_routine(void * ptr) {
-
-	pthread_detach(pthread_self());
-
-	int accepted_session_fd = -1, n = 0;
-	char buffer[PACKETSIZE];
-	int flags;
-	bool ssh_done = false;
-
-	printf("New server proxy thread\n");
-
-	struct proxy_data *p_data = (struct proxy_data *)ptr;
-
-	accepted_session_fd = socket(AF_INET, SOCK_STREAM, 0);
-
-	if (connect(accepted_session_fd, (struct sockaddr *)&p_data->rep_add,
-		sizeof(p_data->rep_add)) == -1) {
-		printf("Connect failed\n");
-		pthread_exit(NULL);
-	} else
-		printf("Connection Established Successfully\n");
-
-	if (-1 == (flags = fcntl(p_data->new_sock, F_GETFL)))
-		pthread_exit(NULL);
-
-	fcntl(p_data->new_sock, F_SETFL, flags | O_NONBLOCK);
-
-	if (-1 == (flags = fcntl(accepted_session_fd, F_GETFL)))
-		pthread_exit(NULL);
-
-	fcntl(accepted_session_fd, F_SETFL, flags | O_NONBLOCK);
-
-	memset(buffer, 0, sizeof(buffer));
-
-	struct ctr_state state;
-	AES_KEY act_key;
-	unsigned char IV[8];
-	
-	if (AES_set_encrypt_key(p_data->key, 128, &act_key) < 0) {
-		fprintf(stderr, "Set encryption key error!\n");
-		exit(1);
-	}
-	
-	while (1) {
-		while ((n = read(p_data->new_sock, buffer, PACKETSIZE)) >= 0) {
-			if (n == 0)
-				pthread_exit(NULL);
-
-			memcpy(IV, buffer, 8);
-
-			unsigned char decryption[n-8];
-			init_ctr(&state, IV);
-
-			AES_ctr128_encrypt(buffer+8, decryption, n-8, &act_key, state.IVec, state.ecount, &state.num);
-
-			write(accepted_session_fd, decryption, n-8);
-
-			if (n < PACKETSIZE)
-				break;
-		}
-
-		while ((n = read(accepted_session_fd, buffer, PACKETSIZE)) > 0) {
-			
-			if (n == 0)
-				pthread_exit(NULL);
-
-			if (n > 0) {
-				if(!RAND_bytes(IV, 8)) {
-					fprintf(stderr, "Error generating random bytes.\n");
-					exit(1);
-				}
-				char *tmp = (char*)malloc(n + 8);
-				memcpy(tmp, IV, 8);
-				
-				unsigned char encryption[n];
-				init_ctr(&state, IV);
-				AES_ctr128_encrypt(buffer, encryption, n, &act_key, state.IVec, state.ecount, &state.num);
-				memcpy(tmp+8, encryption, n);
-				
-				write(p_data->new_sock, tmp, n + 8);
-				
-				free(tmp);
-			}
-			
-			if (ssh_done == false && n == 0)
-				ssh_done = true;
-			
-			if (n < PACKETSIZE)
-				break;
-			
-		}
-		if (ssh_done)
-			break;
-	}
-
-	pthread_exit(0);
-
-}
-
-void service_proxy(int listen_port, int dest_port,
-		struct hostent * dest_entry, char *key) {
-
-	pthread_t server_thread;
-
-	struct sockaddr_in serv_addr, rep_add;
-	int server_fd = -1;
-
-	server_fd = socket(AF_INET, SOCK_STREAM, 0);
-
-	bzero((char *) &serv_addr, sizeof(serv_addr));
-
-	serv_addr.sin_family = AF_INET;
-	serv_addr.sin_addr.s_addr = INADDR_ANY;
-	serv_addr.sin_port 	 = htons(listen_port);
-
-	rep_add.sin_family	= AF_INET;
-	rep_add.sin_addr.s_addr = ((struct in_addr *)(dest_entry->h_addr))->s_addr;
-	rep_add.sin_port	= htons(dest_port);
-
-	bind(server_fd, (struct sockaddr *)&serv_addr, sizeof(serv_addr));
-
-	if (listen(server_fd, 10) < 0) {
-		printf("Error in listening\n");
-		return;
-	}
-
-	for(;;) {
-		struct sockaddr_in cli_addr;
-		socklen_t clilen;
-		int accepted_fd = -1;
-
-		clilen = sizeof(cli_addr);
-		printf("Ready to accept connections\n");
-		accepted_fd = accept(server_fd, (struct sockaddr *)&cli_addr,
-						&clilen);
-
-		if (accepted_fd < 0) {
-			printf ("Error in accepting\n");	
-			return;
-		}
-
-		struct proxy_data *p_data = (struct proxy_data *) malloc (
-				sizeof(struct proxy_data));
-		p_data->rep_add = rep_add;
-		p_data->key 	= key;
-		p_data->new_sock = accepted_fd;
-
-		pthread_create(&server_thread, NULL, server_routine,
-					(void *)p_data);
-	}
-
-}
-
 bool send_encr(char *raw_buffer, int n, int fd, AES_KEY * act_key){
 
 	struct 	ctr_state 	state;
@@ -254,6 +101,137 @@ bool recv_decr(char *raw_buffer, int n, int fd, AES_KEY * act_key) {
 	return true;
 }
 
+void * server_routine(void * ptr) {
+
+	pthread_detach(pthread_self());
+
+	int 		accepted_session_fd = -1, n = 0;
+	char 		buffer[PACKETSIZE];
+	int 		flags;
+	bool 		ssh_done = false;
+	AES_KEY 	act_key;
+
+	printf("New server proxy thread\n");
+
+	struct proxy_data *p_data = (struct proxy_data *)ptr;
+
+	accepted_session_fd = socket(AF_INET, SOCK_STREAM, 0);
+
+	if (-1 == connect(accepted_session_fd, (struct sockaddr *)&p_data->rep_add,
+		sizeof(p_data->rep_add))) {
+		fprintf(stderr, "Accepted Session Connect failed\n");
+		fprintf(stderr, "Check of open ports\n");
+		pthread_exit(NULL);
+	} else
+		printf("Connection Established Successfully\n");
+
+	if (-1 == (flags = fcntl(p_data->new_sock, F_GETFL)))
+		pthread_exit(NULL);
+
+	fcntl(p_data->new_sock, F_SETFL, flags | O_NONBLOCK);
+
+	if (-1 == (flags = fcntl(accepted_session_fd, F_GETFL)))
+		pthread_exit(NULL);
+
+	fcntl(accepted_session_fd, F_SETFL, flags | O_NONBLOCK);
+
+	memset(buffer, 0, sizeof(buffer));
+	
+	if (AES_set_encrypt_key(p_data->key, 128, &act_key) < 0) {
+		fprintf(stderr, "Set encryption key error!\n");
+		exit(1);
+	}
+	
+	while (1) {
+		while ((n = read(p_data->new_sock, buffer, PACKETSIZE)) >= 0) {
+			if (n == 0)
+				pthread_exit(NULL);
+
+			recv_decr(buffer, n, accepted_session_fd, &act_key);
+
+			if (n < PACKETSIZE)
+				break;
+		}
+
+		while ((n = read(accepted_session_fd, buffer, PACKETSIZE)) > 0) {
+			
+			if (n == 0)
+				pthread_exit(NULL);
+
+			if (n > 0)
+				send_encr(buffer, n, p_data->new_sock, &act_key);
+			
+			if (ssh_done == false && n == 0)
+				ssh_done = true;
+			
+			if (n < PACKETSIZE)
+				break;
+		}
+
+		if (ssh_done)
+			break;
+	}
+
+	pthread_exit(0);
+}
+
+void service_proxy(int listen_port, int dest_port, struct hostent * dest_entry,
+			char *key) {
+
+	pthread_t 			server_thread;
+	int 				server_fd = -1;
+
+	struct sockaddr_in 	serv_addr, rep_add;
+	
+	server_fd = socket(AF_INET, SOCK_STREAM, 0);
+
+	bzero((char *) &serv_addr, sizeof(serv_addr));
+
+	serv_addr.sin_family 		= AF_INET;
+	serv_addr.sin_addr.s_addr 	= INADDR_ANY;
+	serv_addr.sin_port 	 		= htons(listen_port);
+
+	rep_add.sin_family			= AF_INET;
+	rep_add.sin_addr.s_addr 	= ((struct in_addr *)
+									(dest_entry->h_addr))->s_addr;
+	rep_add.sin_port			= htons(dest_port);
+
+	if (0 > bind(server_fd, (struct sockaddr *)&serv_addr, sizeof(serv_addr))) {
+		fprintf(stderr, "Unable to bind the address\n");
+		return;
+	}
+
+	if (0 > listen(server_fd, 10)) {
+		fprintf(stderr, "Error in listening\n");
+		return;
+	}
+
+	while (true) {
+		struct sockaddr_in 		dest_addr;
+		socklen_t 				len;
+		int 					accepted_fd = -1;
+
+		len = sizeof(dest_addr);
+
+		if (0 > (accepted_fd = accept(server_fd, (struct sockaddr *)&dest_addr,
+						&len))) {
+
+			fprintf (stderr, "Error in accepting\n");	
+			return;
+		}
+
+		struct proxy_data *p_data = (struct proxy_data *) malloc (
+				sizeof(struct proxy_data));
+
+		p_data->rep_add 	= rep_add;
+		p_data->key 		= key;
+		p_data->new_sock 	= accepted_fd;
+
+		pthread_create(&server_thread, NULL, server_routine, (void *)p_data);
+	}
+}
+
+
 void service_client(int dest_port, struct hostent * dest_entry, char *key) {
 
 	AES_KEY 			act_key;
@@ -288,6 +266,7 @@ void service_client(int dest_port, struct hostent * dest_entry, char *key) {
 		return;
 	}	
 
+	//TODO MORE ERROR CHECKING IN LOOP AND CLEANUP
 	while (true) {
 		while ((n = read(STDIN_FILENO, buffer, PACKETSIZE)) > 0) {
 
