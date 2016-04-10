@@ -10,7 +10,7 @@
 #include <fcntl.h>
 #include <string.h>
 
-#include <pbproxy.h>
+#include "pbproxy.h"
 
 int init_ctr(struct ctr_state *state, const unsigned char iv[8]) {
 
