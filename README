@@ -1,0 +1,48 @@
+CSE 508 Assignment 3
+Plugboard Proxy - A proxy for adding an extra layer of protection to publicly 
+accessible network services.
+
+
+######### Dependency: 
+Please make sure you have libssl developer package to use openssl headers
+to build this package. 
+Make sure you have server ports open. eg. While using ssh, make sure you enable accepting ssh connections on port 22 while using ssh. Make similar changes for any other applications you
+use. 
+
+
+######### Implementation Details:
+1. Server Mode:
+In server mode, pbproxy has a acceptor session, that listens on a port. When a client
+connects , it spawns a thread to thread for accepted session and makes a connection 
+with final destination server. In the communication phase between the client and final 
+destination, through this proxy, encryption and decryption is performed using the key 
+in key file. This allows handling multiple connections for multiple clients respectively.
+
+2. Client Mode:
+In client mode, the connection is made to relay proxy. The data is sent from client to 
+the final destination server through proxy. This is encrypted and sent. Also the data
+received from the server is decrypted and displayed.
+
+The endpoints file descriptors of the communication are std io fds and socket fds as per
+flow of communication between client-proxy-server respectively. 
+
+The IVs are randomized each time a packet is sent.
+
+
+######## Build:
+Fire make command in the package directory.
+
+######## Run:
+Directory also has a package sample files. The binary can run in server(proxy) and client
+mode.
+
+    1. Server Mode (Terminal 1)
+    ./pbproxy -l 65000 -k key_file localhost 22 
+
+    2. Client Mode (Terminal 2)
+    ssh -o "ProxyCommand ./pbproxy -k key_file localhost 65000" localhost 
+
+    3. Client Mode (Terminal 3)
+    ssh -o "ProxyCommand ./pbproxy -k key_file localhost 65000" localhost 
+   
+    Multiple client connections are handled. The implementation section describes how.
