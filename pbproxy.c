@@ -12,24 +12,25 @@
 
 #include "pbproxy.h"
 
-int init_ctr(struct ctr_state *state, const unsigned char iv[8]) {
+int init_ctr(struct ctr_state *state, const unsigned char IV[8]) {
 
 	state->num = 0;
 
 	memset(state->ecount, 0, AES_BLOCK_SIZE);
 
-	memset(state->ivec + 8, 0, 8);
+	memset(state->IVec + 8, 0, 8);
 
-	memcpy(state->ivec, iv, 8);
+	memcpy(state->IVec, IV, 8);
 }
 
 char * read_key(const char *filename) {
 
     long int size = 0;
+    
     FILE *file = fopen(filename, "r");
 
-    if(!file) {
-        fputs("File error.\n", stderr);
+    if (!file) {
+        fprintf(stderr, "Open error for key file\n");
         return NULL;
     }
 
@@ -38,17 +39,19 @@ char * read_key(const char *filename) {
     rewind(file);
 
     char *result = (char *) malloc(size);
-    if(!result) {
-        fputs("Memory error.\n", stderr);
+    
+    if (!result) {
+        fprintf(stderr, "Memory error for key allocation\n");
         return NULL;
     }
 
-    if(fread(result, 1, size, file) != size) {
-        fputs("Read error.\n", stderr);
+    if (fread(result, 1, size, file) != size) {
+        fprintf(stderr, "Read error in key file\n");
         return NULL;
     }
 
     fclose(file);
+    
     return result;
 }
 
@@ -57,7 +60,7 @@ void * server_routine(void * ptr) {
 	pthread_detach(pthread_self());
 
 	int accepted_session_fd = -1, n = 0;
-	char buffer[4096];
+	char buffer[PACKETSIZE];
 	int flags;
 	bool ssh_done = false;
 
@@ -87,48 +90,48 @@ void * server_routine(void * ptr) {
 	memset(buffer, 0, sizeof(buffer));
 
 	struct ctr_state state;
-	AES_KEY aes_key;
-	unsigned char iv[8];
+	AES_KEY act_key;
+	unsigned char IV[8];
 	
-	if (AES_set_encrypt_key(p_data->key, 128, &aes_key) < 0) {
+	if (AES_set_encrypt_key(p_data->key, 128, &act_key) < 0) {
 		fprintf(stderr, "Set encryption key error!\n");
 		exit(1);
 	}
 	
 	while (1) {
-		while ((n = read(p_data->new_sock, buffer, 4096)) >= 0) {
+		while ((n = read(p_data->new_sock, buffer, PACKETSIZE)) >= 0) {
 			if (n == 0)
 				pthread_exit(NULL);
 
-			memcpy(iv, buffer, 8);
+			memcpy(IV, buffer, 8);
 
 			unsigned char decryption[n-8];
-			init_ctr(&state, iv);
+			init_ctr(&state, IV);
 
-			AES_ctr128_encrypt(buffer+8, decryption, n-8, &aes_key, state.ivec, state.ecount, &state.num);
+			AES_ctr128_encrypt(buffer+8, decryption, n-8, &act_key, state.IVec, state.ecount, &state.num);
 
 			write(accepted_session_fd, decryption, n-8);
 
-			if (n < 4096)
+			if (n < PACKETSIZE)
 				break;
 		}
 
-		while ((n = read(accepted_session_fd, buffer, 4096)) > 0) {
+		while ((n = read(accepted_session_fd, buffer, PACKETSIZE)) > 0) {
 			
 			if (n == 0)
 				pthread_exit(NULL);
 
 			if (n > 0) {
-				if(!RAND_bytes(iv, 8)) {
+				if(!RAND_bytes(IV, 8)) {
 					fprintf(stderr, "Error generating random bytes.\n");
 					exit(1);
 				}
 				char *tmp = (char*)malloc(n + 8);
-				memcpy(tmp, iv, 8);
+				memcpy(tmp, IV, 8);
 				
 				unsigned char encryption[n];
-				init_ctr(&state, iv);
-				AES_ctr128_encrypt(buffer, encryption, n, &aes_key, state.ivec, state.ecount, &state.num);
+				init_ctr(&state, IV);
+				AES_ctr128_encrypt(buffer, encryption, n, &act_key, state.IVec, state.ecount, &state.num);
 				memcpy(tmp+8, encryption, n);
 				
 				write(p_data->new_sock, tmp, n + 8);
@@ -139,7 +142,7 @@ void * server_routine(void * ptr) {
 			if (ssh_done == false && n == 0)
 				ssh_done = true;
 			
-			if (n < 4096)
+			if (n < PACKETSIZE)
 				break;
 			
 		}
@@ -152,7 +155,7 @@ void * server_routine(void * ptr) {
 }
 
 void service_proxy(int listen_port, int dest_port,
-		struct hostent * dest_address, char *key) {
+		struct hostent * dest_entry, char *key) {
 
 	pthread_t server_thread;
 
@@ -168,7 +171,7 @@ void service_proxy(int listen_port, int dest_port,
 	serv_addr.sin_port 	 = htons(listen_port);
 
 	rep_add.sin_family	= AF_INET;
-	rep_add.sin_addr.s_addr = ((struct in_addr *)(dest_address->h_addr))->s_addr;
+	rep_add.sin_addr.s_addr = ((struct in_addr *)(dest_entry->h_addr))->s_addr;
 	rep_add.sin_port	= htons(dest_port);
 
 	bind(server_fd, (struct sockaddr *)&serv_addr, sizeof(serv_addr));
@@ -205,24 +208,73 @@ void service_proxy(int listen_port, int dest_port,
 
 }
 
-void service_client(int dest_port, struct hostent * dest_address, char *key) {
+bool send_encr(char *raw_buffer, int n, int fd, AES_KEY * act_key){
+
+	struct 	ctr_state 	state;
+	unsigned char 		IV[8];
+	unsigned char 		encryption[n];
+
+	if(!RAND_bytes(IV, 8)) {
+		fprintf(stderr, "Error generating random bytes\n");
+		return false;
+	}
+
+	char *tmp = (char*) malloc(n + 8);
+	memcpy(tmp, IV, 8);
 	
-	int client_fd = -1, n = 0;
+	init_ctr(&state, IV);
+	
+	AES_ctr128_encrypt(raw_buffer, encryption, n, act_key, state.IVec,
+		state.ecount, &state.num);
 
+	memcpy(tmp + 8, encryption, n);
+	
+	write(fd, tmp, n + 8);
+	
+	free(tmp);
+
+	return true;
+}
+
+bool recv_decr(char *raw_buffer, int n, int fd, AES_KEY * act_key) {
+
+	struct 	ctr_state 	state;
+	unsigned char 		IV[8];
+	unsigned char 		decryption[n-8];
+
+	memcpy(IV, raw_buffer, 8);
+
+	init_ctr(&state, IV);
+		
+	AES_ctr128_encrypt(raw_buffer + 8, decryption, n - 8, act_key, state.IVec,
+		state.ecount, &state.num);
+		
+	write(fd, decryption, n-8);
+
+	return true;
+}
+
+void service_client(int dest_port, struct hostent * dest_entry, char *key) {
+
+	AES_KEY 			act_key;
+
+	int 				client_fd = -1, n = 0;
+	struct 	sockaddr_in serv_addr, rep_add;	
+	char 				buffer[PACKETSIZE];
+	
 	client_fd = socket(AF_INET, SOCK_STREAM, 0);
-
-	struct sockaddr_in serv_addr, rep_add;
 
 	bzero((char *) &serv_addr, sizeof(serv_addr));
 
-	serv_addr.sin_family = AF_INET;
-	serv_addr.sin_port = htons(dest_port);
-	serv_addr.sin_addr.s_addr = ((struct in_addr *)
-								(dest_address->h_addr))->s_addr;
+	serv_addr.sin_family 		= AF_INET;
+	serv_addr.sin_port 			= htons(dest_port);
+	serv_addr.sin_addr.s_addr 	= ((struct in_addr *)
+								(dest_entry->h_addr))->s_addr;
 		
-	if (connect(client_fd, (struct sockaddr *)&serv_addr, sizeof(serv_addr))
-		 == -1) {
-		printf("Connection failed!\n");
+	if (-1 == connect(client_fd, (struct sockaddr *)&serv_addr,
+			sizeof(serv_addr))) {
+
+		fprintf(stderr, "Connection failed. Check if dest port is open\n");
 		return;
 	}
 
@@ -230,57 +282,28 @@ void service_client(int dest_port, struct hostent * dest_address, char *key) {
 
 	fcntl(STDIN_FILENO, F_SETFL, O_NONBLOCK);
 	fcntl(client_fd, F_SETFL, O_NONBLOCK);
-
-	char buffer[4096];
-
-	struct ctr_state state;
-	unsigned char iv[8];
-	AES_KEY aes_key;
 	
-	if (AES_set_encrypt_key(key, 128, &aes_key) < 0) {
-		printf("Set encryption key error!\n");
+	if (AES_set_encrypt_key(key, 128, &act_key) < 0) {
+		fprintf(stderr, "Set encryption key error\n");
 		return;
 	}	
 
 	while (true) {
-		while ((n = read(STDIN_FILENO, buffer, 4096)) > 0) {
+		while ((n = read(STDIN_FILENO, buffer, PACKETSIZE)) > 0) {
 
-			if(!RAND_bytes(iv, 8)) {
-					printf("Error generating random bytes.\n");
-					return;
-			}
+			send_encr(buffer, n, client_fd, &act_key);
 
-			char *tmp = (char*) malloc(n + 8);
-			memcpy(tmp, iv, 8);
-			
-			unsigned char encryption[n];
-			init_ctr(&state, iv);
-			AES_ctr128_encrypt(buffer, encryption, n, &aes_key, state.ivec,
-				state.ecount, &state.num);
-			memcpy(tmp + 8, encryption, n);
-			write(client_fd, tmp, n + 8);
-			free(tmp);
-
-			if (n < 4096)
+			if (n < PACKETSIZE)
 				break;
 		}
 
-		while ((n = read(client_fd, buffer, 4096)) > 0) {
+		while ((n = read(client_fd, buffer, PACKETSIZE)) > 0) {
 
-			memcpy(iv, buffer, 8);
+			recv_decr(buffer, n, STDOUT_FILENO, &act_key);
 
-			unsigned char decryption[n-8];
-			init_ctr(&state, iv);
-				
-			AES_ctr128_encrypt(buffer + 8, decryption, n - 8, &aes_key, state.ivec,
-				state.ecount, &state.num);
-				
-			write(STDOUT_FILENO, decryption, n-8);
-
-			if (n < 4096)
+			if (n < PACKETSIZE)
 				break;
 		}
-
 	}
 }
 
@@ -289,9 +312,9 @@ int main (int argc, char *argv[]) {
 	int 	option 		= 0;
 	int 	listen_port	= -1;
 	bool 	proxy_mode 	= false;
-	char	key_file[4096];
+	char	key_file[PACKETSIZE];
 
-	char	dest_address[4096];
+	char	dest_entry[PACKETSIZE];
 	int 	dest_port	= -1;
 
 	while((option = getopt(argc, argv, "l:k:")) != -1) {
@@ -312,26 +335,30 @@ int main (int argc, char *argv[]) {
 		}
 	}
 
-	strcpy(dest_address, argv[optind]);
+	strcpy(dest_entry, argv[optind]);
 
 	dest_port	 = atoi(argv[optind + 1]);
 
 	char * key = read_key(key_file);
 
-	struct hostent *destination_name =  NULL;
+	if (!key) {
+		fprintf(stderr, "%s\n", "Improper Key");
+		return 0;
+	}
 
-	destination_name = gethostbyname(dest_address);
+	struct hostent *destination_entry =  NULL;
 
-	if (!destination_name) {
-		printf ("Couldnt resolve host address\n");
+	destination_entry = gethostbyname(dest_entry);
+
+	if (!destination_entry) {
+		fprintf (stderr, "Couldnt resolve host address\n");
 		return 0;
 	}
 
 	if (proxy_mode)
-		service_proxy(listen_port, dest_port, destination_name, key);
+		service_proxy(listen_port, dest_port, destination_entry, key);
 	else
-		service_client(dest_port, destination_name, key);
+		service_client(dest_port, destination_entry, key);
 
 	return 0;
-
 }
