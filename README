@@ -23,6 +23,9 @@ In client mode, the connection is made to relay proxy. The data is sent from cli
 the final destination server through proxy. This is encrypted and sent. Also the data
 received from the server is decrypted and displayed.
 
+Providing asymetric (wrong keys) won't allow ssh authentication. Hence this can verify
+working of encryption.
+
 The endpoints file descriptors of the communication are std io fds and socket fds as per
 flow of communication between client-proxy-server respectively. 
 
