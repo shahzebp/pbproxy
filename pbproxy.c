@@ -266,7 +266,6 @@ void service_client(int dest_port, struct hostent * dest_entry, char *key) {
 		return;
 	}	
 
-	//TODO MORE ERROR CHECKING IN LOOP AND CLEANUP
 	while (true) {
 		while ((n = read(STDIN_FILENO, buffer, PACKETSIZE)) >= 0) {
 
